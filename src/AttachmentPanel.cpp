@@ -1,10 +1,17 @@
 #include "AttachmentPanel.h"
 
+#include "KesProject.h"
 #include "KesStyle.h"
 #include "ModelDocument.h"
+#include "PreviewState.h"
 
 #include <QComboBox>
+#include <QDir>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QSettings>
+#include <QToolButton>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -49,6 +56,55 @@ QLabel* note(const QString& text)
 
 } // namespace
 
+QString browseContentFile(QWidget* parent, const PreviewState* preview, const QString& title, const QString& filter,
+                          const QString& current)
+{
+    const QString root = preview->contentRoot();
+    QString start = current.isEmpty() ? QString() : QFileInfo(preview->resolvePath(current)).absolutePath();
+    if (start.isEmpty() || !QFileInfo(start).isDir()) start = QSettings().value("lastContentDir", root).toString();
+    const QString file = QFileDialog::getOpenFileName(parent, title, start, filter);
+    if (file.isEmpty()) return {};
+    QSettings().setValue("lastContentDir", QFileInfo(file).absolutePath());
+    const QString rel = contentRelativePath(root, file);
+    return rel.isEmpty() ? QDir::fromNativeSeparators(file) : rel;
+}
+
+PathEdit::PathEdit(const PreviewState* preview, const QString& title, const QString& filter, QWidget* parent) : QWidget(parent)
+{
+    auto* h = new QHBoxLayout(this);
+    h->setContentsMargins(0, 0, 0, 0);
+    h->setSpacing(3);
+    m_edit = new QLineEdit;
+    m_edit->setClearButtonEnabled(true);
+    auto* browse = new QToolButton;
+    browse->setText("…");
+    browse->setToolTip("Browse");
+    h->addWidget(m_edit, 1);
+    h->addWidget(browse);
+    connect(m_edit, &QLineEdit::editingFinished, this, [this] { emit edited(path()); });
+    // the clear button doesn't finish editing
+    connect(m_edit, &QLineEdit::textChanged, this, [this](const QString& t) {
+        if (t.isEmpty() && !m_edit->hasFocus()) emit edited({});
+    });
+    connect(browse, &QToolButton::clicked, this, [this, preview, title, filter] {
+        const QString picked = browseContentFile(this, preview, title, filter, path());
+        if (picked.isEmpty()) return;
+        m_edit->setText(picked);
+        emit edited(picked);
+    });
+}
+
+void PathEdit::setPath(const QString& path)
+{
+    if (m_edit->hasFocus()) return;
+    const QSignalBlocker block(m_edit);
+    m_edit->setText(path);
+}
+
+QString PathEdit::path() const { return QDir::fromNativeSeparators(m_edit->text().trimmed()); }
+
+void PathEdit::setPlaceholder(const QString& text) { m_edit->setPlaceholderText(text); }
+
 Vec3Edit::Vec3Edit(double step, QWidget* parent) : QWidget(parent)
 {
     auto* h = new QHBoxLayout(this);
@@ -82,7 +138,8 @@ QVector3D Vec3Edit::value() const
     return {float(m_spin[0]->value()), float(m_spin[1]->value()), float(m_spin[2]->value())};
 }
 
-AttachmentPanel::AttachmentPanel(ModelDocument* doc, QWidget* parent) : QWidget(parent), m_doc(doc)
+AttachmentPanel::AttachmentPanel(ModelDocument* doc, const PreviewState* preview, QWidget* parent)
+    : QWidget(parent), m_doc(doc), m_preview(preview)
 {
     m_root = new QVBoxLayout(this);
     m_root->setContentsMargins(8, 8, 8, 8);
@@ -130,20 +187,20 @@ void AttachmentPanel::rebuild()
         buildNode(lay, sel.index);
         return;
     }
-    if (sel.kind != Selection::Socket && sel.kind != Selection::Collider) {
-        lay->addWidget(note("Select a bone, socket or collider in the Skeleton panel or click one in the viewport.\n\n"
-                            "Left-drag: orbit   Shift/middle-drag: pan\nWheel or right-drag: zoom   F: frame"));
+    if (sel.kind != Selection::Socket && sel.kind != Selection::Collider && sel.kind != Selection::Child) {
+        buildModel(lay);
         return;
     }
 
-    auto* title = new QLabel(sel.kind == Selection::Socket ? "Socket" : "Collider");
+    auto* title = new QLabel(sel.kind == Selection::Socket ? "Socket" : sel.kind == Selection::Collider ? "Collider" : "Child Model");
     title->setObjectName("Title");
     lay->addWidget(title);
     auto* form = new QFormLayout;
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     lay->addLayout(form);
     if (sel.kind == Selection::Socket) buildSocket(form, sel.index);
-    else buildCollider(form, sel.index);
+    else if (sel.kind == Selection::Collider) buildCollider(form, sel.index);
+    else buildChild(form, sel.index);
     if (m_refresh) m_refresh();
 }
 
@@ -159,6 +216,121 @@ void AttachmentPanel::buildNode(QVBoxLayout* lay, int index)
     if (node.parentIndex >= 0) info += QString("  ·  parent %1").arg(QString::fromStdString(model.nodes[size_t(node.parentIndex)].name));
     lay->addWidget(note(info));
     lay->addWidget(note("Use the Skeleton panel's Socket and Collider buttons to attach to this bone."));
+}
+
+void AttachmentPanel::buildModel(QVBoxLayout* lay)
+{
+    auto* title = new QLabel("Model");
+    title->setObjectName("Title");
+    lay->addWidget(title);
+    auto* form = new QFormLayout;
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    lay->addLayout(form);
+
+    auto* material = new PathEdit(m_preview, "Default Material", "Materials (*.mat)");
+    material->setPlaceholder("(none: white)");
+    form->addRow("Default material", material);
+    lay->addWidget(note("Used wherever this model is placed without its own Material. A Material set on the entity "
+                        "(Forge's Material field) replaces it; child models keep theirs."));
+    connect(material, &PathEdit::edited, this, [this](const QString& path) {
+        if (path.toStdString() == m_doc->model().defaultMaterial) return;
+        m_editing = true;
+        m_doc->edit("Set default material", [&](KModelData& m) { m.defaultMaterial = path.toStdString(); });
+        m_editing = false;
+    });
+    m_refresh = [=, this] { material->setPath(QString::fromStdString(m_doc->model().defaultMaterial)); };
+    m_refresh();
+
+    lay->addSpacing(12);
+    lay->addWidget(note("Select a bone, socket, collider or child model in the Skeleton panel or click one in the viewport.\n\n"
+                        "Left-drag: orbit   Shift/middle-drag: pan\nWheel or right-drag: zoom   F: frame"));
+}
+
+void AttachmentPanel::buildChild(QFormLayout* form, int index)
+{
+    const auto child = [this, index]() -> const KModelChild& { return m_doc->model().children[size_t(index)]; };
+    auto* name = new QLineEdit;
+    auto* modelPath = new PathEdit(m_preview, "Child Model", "KES models (*.kmodel)");
+    auto* material = new PathEdit(m_preview, "Child Material", "Materials (*.mat)");
+    auto* animation = new PathEdit(m_preview, "Child Animation", "Animations (*.kanim *.kanimgraph)");
+    animation->setPlaceholder("(none: bind pose)");
+    auto* bone = boneCombo(child().boneIndex);
+    auto* pos = new Vec3Edit(0.01);
+    auto* rot = new Vec3Edit(1.0);
+    auto* scale = new Vec3Edit(0.05);
+    form->addRow("Name", name);
+    form->addRow("Model", modelPath);
+    form->addRow("Material", material);
+    form->addRow("Animation", animation);
+    form->addRow("Bone", bone);
+    form->addRow("Position", pos);
+    form->addRow("Rotation", rot);
+    form->addRow("Scale", scale);
+    form->addRow(note("Drawn attached to the bone in the game and in Forge. An empty Material uses the child model's "
+                      "default material. The Animation (a .kanim clip or a .kanimgraph) plays on its own; game code "
+                      "drives it with SetChildAnimation / SetChildAnim* by this name. Press Space to preview it."));
+
+    const auto apply = [this, index](const QString& text, const QString& key, const std::function<void(KModelChild&)>& fn) {
+        m_editing = true;
+        m_doc->edit(text, [&](KModelData& m) { fn(m.children[size_t(index)]); }, QString("child:%1:%2").arg(index).arg(key));
+        m_editing = false;
+    };
+    const auto showChildDefault = [this, child, material] {
+        KModelData childModel;
+        const QString file = m_preview->resolvePath(QString::fromStdString(child().modelPath));
+        if (LoadKModelFile(file.toUtf8().constData(), childModel) && !childModel.defaultMaterial.empty())
+            material->setPlaceholder(QString("(model default: %1)").arg(QString::fromStdString(childModel.defaultMaterial)));
+        else
+            material->setPlaceholder("(model default: none)");
+    };
+    connect(name, &QLineEdit::editingFinished, this, [this, apply, name, index] {
+        QString n = name->text().trimmed();
+        if (n.isEmpty() || n.toStdString() == m_doc->model().children[size_t(index)].name) return;
+        n = m_doc->uniqueChildName(n);
+        apply("Rename child model", "name", [&](KModelChild& c) { c.name = n.toStdString(); });
+    });
+    connect(modelPath, &PathEdit::edited, this, [this, apply, index, showChildDefault](const QString& path) {
+        if (path.isEmpty() || path.toStdString() == m_doc->model().children[size_t(index)].modelPath) return;
+        apply("Change child model", "model", [&](KModelChild& c) { c.modelPath = path.toStdString(); });
+        showChildDefault();
+    });
+    connect(material, &PathEdit::edited, this, [this, apply, index](const QString& path) {
+        if (path.toStdString() == m_doc->model().children[size_t(index)].materialPath) return;
+        apply("Change child material", "material", [&](KModelChild& c) { c.materialPath = path.toStdString(); });
+    });
+    connect(animation, &PathEdit::edited, this, [this, apply, index](const QString& path) {
+        if (path.toStdString() == m_doc->model().children[size_t(index)].animationPath) return;
+        apply("Change child animation", "animation", [&](KModelChild& c) { c.animationPath = path.toStdString(); });
+    });
+    connect(bone, &QComboBox::currentIndexChanged, this, [apply, bone](int) {
+        apply("Change child bone", "bone", [&](KModelChild& c) { c.boneIndex = bone->currentData().toInt(); });
+    });
+    connect(pos, &Vec3Edit::edited, this, [apply](const QVector3D& v) {
+        apply("Move child model", "pos", [&](KModelChild& c) { fromVec(v, c.translation); });
+    });
+    connect(rot, &Vec3Edit::edited, this, [apply](const QVector3D& v) {
+        apply("Rotate child model", "rot", [&](KModelChild& c) { quatFromEuler(v, c.rotation); });
+    });
+    connect(scale, &Vec3Edit::edited, this, [apply](const QVector3D& v) {
+        apply("Scale child model", "scale", [&](KModelChild& c) { fromVec(v, c.scale); });
+    });
+
+    m_refresh = [=, this] {
+        if (index >= int(m_doc->model().children.size())) return;
+        const KModelChild& c = child();
+        if (!name->hasFocus()) name->setText(QString::fromStdString(c.name));
+        modelPath->setPath(QString::fromStdString(c.modelPath));
+        material->setPath(QString::fromStdString(c.materialPath));
+        animation->setPath(QString::fromStdString(c.animationPath));
+        {
+            const QSignalBlocker b(bone);
+            bone->setCurrentIndex(std::max(0, bone->findData(c.boneIndex)));
+        }
+        pos->setValue(toVec(c.translation));
+        rot->setValue(eulerOf(c.rotation));
+        scale->setValue(toVec(c.scale));
+    };
+    showChildDefault();
 }
 
 void AttachmentPanel::buildSocket(QFormLayout* form, int index)

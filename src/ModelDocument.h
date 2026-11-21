@@ -10,12 +10,20 @@
 namespace kme {
 
 struct Selection {
-    enum Kind { None, Node, Socket, Collider };
+    enum Kind { None, Node, Socket, Collider, Child };
     Kind kind = None;
     int index = -1;
 
     bool operator==(const Selection& o) const { return kind == o.kind && index == o.index; }
     bool operator!=(const Selection& o) const { return !(*this == o); }
+};
+
+// The parts of a .kmodel the editor can change. Mesh and skeleton come from the import.
+struct ModelAttachments {
+    std::vector<KModelSocket> sockets;
+    std::vector<KModelCollider> colliders;
+    std::vector<KModelChild> children;
+    std::string defaultMaterial;
 };
 
 class ModelDocument : public QObject {
@@ -42,6 +50,7 @@ public:
     int boneForNode(int nodeIndex) const;
     QString boneName(int boneIndex) const;
     QString uniqueSocketName(const QString& base) const;
+    QString uniqueChildName(const QString& base) const;
 
 signals:
     void modelReset();
@@ -51,7 +60,8 @@ signals:
 
 private:
     friend class AttachmentCommand;
-    void setAttachments(const std::vector<KModelSocket>& sockets, const std::vector<KModelCollider>& colliders);
+    void setAttachments(const ModelAttachments& attachments);
+    ModelAttachments attachments() const;
 
     KModelData m_model;
     QString m_path;

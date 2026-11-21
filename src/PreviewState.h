@@ -49,6 +49,10 @@ public:
     AnimBlendTreeInstance& graphInstance() { return m_instance; }
     void restartGraph();
 
+    // total playback time, drives child model animations
+    float childTime() const { return m_childTime; }
+    std::shared_ptr<AnimationClipData> loadClip(const QString& contentPath);
+
     const std::vector<AnimationTransform>& pose() const { return m_pose; }
     const std::vector<float>& nodeWorld() const { return m_nodeWorld; }
     const std::vector<float>& skin() const { return m_skin; }
@@ -61,7 +65,6 @@ signals:
 private:
     void tick();
     void evaluate(float dt);
-    std::shared_ptr<AnimationClipData> loadClip(const QString& contentPath);
 
     ModelDocument* m_doc;
     GraphModel* m_graph;
@@ -74,6 +77,7 @@ private:
 
     bool m_playing = false;
     float m_time = 0.0f;
+    float m_childTime = 0.0f;
     float m_speed = 1.0f;
     bool m_loop = true;
     QTimer m_timer;

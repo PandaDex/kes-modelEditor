@@ -1,8 +1,11 @@
 #include "SkeletonPanel.h"
 
+#include "AttachmentPanel.h"
 #include "KesStyle.h"
 #include "ModelDocument.h"
+#include "PreviewState.h"
 
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLineEdit>
@@ -42,7 +45,8 @@ const char* shapeName(KModelColliderShape s)
 
 } // namespace
 
-SkeletonPanel::SkeletonPanel(ModelDocument* doc, QWidget* parent) : QWidget(parent), m_doc(doc)
+SkeletonPanel::SkeletonPanel(ModelDocument* doc, const PreviewState* preview, QWidget* parent)
+    : QWidget(parent), m_doc(doc), m_preview(preview)
 {
     auto* lay = new QVBoxLayout(this);
     lay->setContentsMargins(6, 6, 6, 6);
@@ -52,9 +56,11 @@ SkeletonPanel::SkeletonPanel(ModelDocument* doc, QWidget* parent) : QWidget(pare
     bar->setSpacing(2);
     auto* addSocketBtn = toolButton("plus", "Socket", "Add a socket to the selected bone");
     auto* addColliderBtn = toolButton("plus", "Collider", "Add a collider on the selected bone");
-    auto* deleteBtn = toolButton("trash", QString(), "Delete the selected socket or collider");
+    auto* addChildBtn = toolButton("plus", "Model", "Attach another .kmodel to the selected bone (e.g. a weapon in a hand)");
+    auto* deleteBtn = toolButton("trash", QString(), "Delete the selected socket, collider or child model");
     bar->addWidget(addSocketBtn);
     bar->addWidget(addColliderBtn);
+    bar->addWidget(addChildBtn);
     bar->addStretch(1);
     bar->addWidget(deleteBtn);
     lay->addLayout(bar);
@@ -72,6 +78,7 @@ SkeletonPanel::SkeletonPanel(ModelDocument* doc, QWidget* parent) : QWidget(pare
 
     connect(addSocketBtn, &QToolButton::clicked, this, &SkeletonPanel::addSocket);
     connect(addColliderBtn, &QToolButton::clicked, this, &SkeletonPanel::addCollider);
+    connect(addChildBtn, &QToolButton::clicked, this, &SkeletonPanel::addChildModel);
     connect(deleteBtn, &QToolButton::clicked, this, &SkeletonPanel::deleteSelected);
     connect(m_filter, &QLineEdit::textChanged, this, &SkeletonPanel::applyFilter);
     connect(m_tree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* item) { onCurrentChanged(item); });
@@ -140,6 +147,23 @@ void SkeletonPanel::rebuild()
         parent->insertChild(0, item);
     }
 
+    for (size_t i = 0; i < model.children.size(); ++i) {
+        const KModelChild& c = model.children[i];
+        const QString file = QFileInfo(QString::fromStdString(c.modelPath)).fileName();
+        auto* item = new QTreeWidgetItem({QString("▣ %1").arg(c.name.empty() ? file : QString::fromStdString(c.name))});
+        item->setData(0, kKindRole, int(Selection::Child));
+        item->setData(0, kIndexRole, int(i));
+        item->setFont(0, attachFont);
+        item->setForeground(0, QColor(225, 170, 90));
+        item->setToolTip(0, QString("Child model: %1").arg(QString::fromStdString(c.modelPath)));
+        QTreeWidgetItem* parent = rootItem;
+        if (c.boneIndex >= 0 && c.boneIndex < int(model.bones.size())) {
+            const int node = model.bones[size_t(c.boneIndex)].nodeIndex;
+            if (node >= 0 && node < int(items.size())) parent = items[size_t(node)];
+        }
+        parent->insertChild(0, item);
+    }
+
     auto* colliders = new QTreeWidgetItem(m_tree, {QString("Colliders (%1)").arg(model.colliders.size())});
     colliders->setData(0, kKindRole, kColliderHeader);
     colliders->setFont(0, boneFont);
@@ -193,7 +217,8 @@ void SkeletonPanel::onCurrentChanged(QTreeWidgetItem* item)
     Selection s;
     if (item) {
         const int kind = item->data(0, kKindRole).toInt();
-        if (kind == int(Selection::Node) || kind == int(Selection::Socket) || kind == int(Selection::Collider)) {
+        if (kind == int(Selection::Node) || kind == int(Selection::Socket) || kind == int(Selection::Collider) ||
+            kind == int(Selection::Child)) {
             s.kind = Selection::Kind(kind);
             s.index = item->data(0, kIndexRole).toInt();
             if (s.kind == Selection::Node && s.index < 0) s = {};
@@ -216,6 +241,7 @@ int SkeletonPanel::selectedBone() const
     if (sel.kind == Selection::Socket && sel.index < int(model.sockets.size())) return model.sockets[size_t(sel.index)].boneIndex;
     if (sel.kind == Selection::Collider && sel.index < int(model.colliders.size()))
         return model.colliders[size_t(sel.index)].boneIndex;
+    if (sel.kind == Selection::Child && sel.index < int(model.children.size())) return model.children[size_t(sel.index)].boneIndex;
     return -1;
 }
 
@@ -245,6 +271,21 @@ void SkeletonPanel::addCollider()
     m_doc->setSelection({Selection::Collider, int(m_doc->model().colliders.size()) - 1});
 }
 
+void SkeletonPanel::addChildModel()
+{
+    if (!m_doc->isOpen()) return;
+    const int bone = selectedBone();
+    const QString path = browseContentFile(this, m_preview, "Attach Model", "KES models (*.kmodel)");
+    if (path.isEmpty()) return;
+    if (QFileInfo(m_preview->resolvePath(path)).absoluteFilePath() == QFileInfo(m_doc->path()).absoluteFilePath()) return;
+    KModelChild child;
+    child.boneIndex = bone;
+    child.modelPath = path.toStdString();
+    child.name = m_doc->uniqueChildName(QFileInfo(path).completeBaseName()).toStdString();
+    m_doc->edit("Add child model", [&](KModelData& m) { m.children.push_back(child); });
+    m_doc->setSelection({Selection::Child, int(m_doc->model().children.size()) - 1});
+}
+
 void SkeletonPanel::deleteSelected()
 {
     const Selection sel = m_doc->selection();
@@ -254,6 +295,9 @@ void SkeletonPanel::deleteSelected()
     } else if (sel.kind == Selection::Collider) {
         m_doc->setSelection({});
         m_doc->edit("Delete collider", [&](KModelData& m) { m.colliders.erase(m.colliders.begin() + sel.index); });
+    } else if (sel.kind == Selection::Child) {
+        m_doc->setSelection({});
+        m_doc->edit("Delete child model", [&](KModelData& m) { m.children.erase(m.children.begin() + sel.index); });
     }
 }
 
@@ -264,8 +308,9 @@ void SkeletonPanel::showContextMenu(const QPoint& pos)
     QMenu menu(this);
     menu.addAction(kes::style::icon("plus"), "Add Socket Here", this, &SkeletonPanel::addSocket);
     menu.addAction(kes::style::icon("plus"), "Add Collider Here", this, &SkeletonPanel::addCollider);
+    menu.addAction(kes::style::icon("plus"), "Attach Model Here…", this, &SkeletonPanel::addChildModel);
     const Selection::Kind k = m_doc->selection().kind;
-    if (k == Selection::Socket || k == Selection::Collider) {
+    if (k == Selection::Socket || k == Selection::Collider || k == Selection::Child) {
         menu.addSeparator();
         menu.addAction(kes::style::icon("trash"), "Delete", this, &SkeletonPanel::deleteSelected);
     }

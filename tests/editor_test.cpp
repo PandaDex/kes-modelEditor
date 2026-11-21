@@ -118,6 +118,23 @@ int main(int argc, char** argv)
     EXPECT(std::fabs(doc.model().sockets[0].translation[0]) < 1e-6f);
     doc.undoStack()->redo();
     EXPECT(std::fabs(doc.model().sockets[0].translation[0] - 0.3f) < 1e-5f);
+
+    KModelChild child;
+    child.name = "gun";
+    child.modelPath = "models/gun.kmodel";
+    child.animationPath = "anims/gun_idle.kanim";
+    child.boneIndex = upper;
+    doc.edit("Add child model", [&](KModelData& m) { m.children.push_back(child); });
+    doc.edit("Set default material", [&](KModelData& m) { m.defaultMaterial = "materials/skin.mat"; });
+    doc.setSelection({kme::Selection::Child, 0});
+    doc.undoStack()->undo();
+    EXPECT(doc.model().defaultMaterial.empty());
+    doc.undoStack()->undo();
+    EXPECT(doc.model().children.empty());
+    EXPECT(doc.selection().kind == kme::Selection::None);
+    doc.undoStack()->redo();
+    doc.undoStack()->redo();
+    EXPECT(doc.model().children.size() == 1 && doc.model().defaultMaterial == "materials/skin.mat");
     EXPECT(doc.isModified());
     EXPECT(doc.save(&error));
     EXPECT(!doc.isModified());
@@ -127,6 +144,9 @@ int main(int argc, char** argv)
     EXPECT(saved.sockets.size() == 1 && saved.sockets[0].name == "tip");
     EXPECT(saved.colliders.size() == 1 && saved.colliders[0].shape == KModelColliderShape::Capsule);
     EXPECT(saved.meshes.size() == doc.model().meshes.size());
+    EXPECT(saved.children.size() == 1 && saved.children[0].modelPath == "models/gun.kmodel" && saved.children[0].boneIndex == upper &&
+           saved.children[0].animationPath == "anims/gun_idle.kanim");
+    EXPECT(saved.defaultMaterial == "materials/skin.mat");
 
     kme::GraphModel graph;
     const int clip = graph.addNode("Clip", {0, 0});

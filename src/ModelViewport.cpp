@@ -5,6 +5,7 @@
 #include "PreviewState.h"
 #include "animation_pose.h"
 
+#include <QFileInfo>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -69,6 +70,7 @@ QVector3D nodePosition(const std::vector<float>& world, int node)
 const QColor kBoneColor(150, 170, 205);
 const QColor kSocketColor(90, 165, 255);
 const QColor kColliderColor(110, 210, 120);
+const QVector3D kChildColor(0.80f, 0.66f, 0.48f);
 
 } // namespace
 
@@ -93,8 +95,11 @@ ModelViewport::~ModelViewport()
     m_meshVbo.destroy();
     m_meshIbo.destroy();
     m_lineVbo.destroy();
+    m_childVbo.destroy();
+    m_childIbo.destroy();
     m_meshVao.destroy();
     m_lineVao.destroy();
+    m_childVao.destroy();
     doneCurrent();
 }
 
@@ -132,6 +137,9 @@ bool ModelViewport::gizmoFrame(GizmoFrame& out) const
     } else if (sel.kind == Selection::Collider && sel.index >= 0 && sel.index < int(model.colliders.size())) {
         translation = model.colliders[size_t(sel.index)].center;
         bone = model.colliders[size_t(sel.index)].boneIndex;
+    } else if (sel.kind == Selection::Child && sel.index >= 0 && sel.index < int(model.children.size())) {
+        translation = model.children[size_t(sel.index)].translation;
+        bone = model.children[size_t(sel.index)].boneIndex;
     } else {
         return false;
     }
@@ -230,8 +238,9 @@ void ModelViewport::dragGizmo(const QPoint& from, const QPoint& to)
         const float world = float(QPointF::dotProduct(QPointF(to - from), s) / s2) * g.size;
         const float local = world / g.axisScale[k];
         m_doc->edit("Move with gizmo", [&](KModelData& m) {
-            float* t = sel.kind == Selection::Socket ? m.sockets[size_t(sel.index)].translation
-                                                     : m.colliders[size_t(sel.index)].center;
+            float* t = sel.kind == Selection::Socket     ? m.sockets[size_t(sel.index)].translation
+                       : sel.kind == Selection::Collider ? m.colliders[size_t(sel.index)].center
+                                                         : m.children[size_t(sel.index)].translation;
             t[k] += local;
         }, key);
         return;
@@ -251,8 +260,9 @@ void ModelViewport::dragGizmo(const QPoint& from, const QPoint& to)
     axis[k] = 1.0f;
     const QQuaternion r = QQuaternion::fromAxisAndAngle(axis, float(qRadiansToDegrees(delta)));
     m_doc->edit("Rotate with gizmo", [&](KModelData& m) {
-        float* q = sel.kind == Selection::Socket ? m.sockets[size_t(sel.index)].rotation
-                                                 : m.colliders[size_t(sel.index)].rotation;
+        float* q = sel.kind == Selection::Socket     ? m.sockets[size_t(sel.index)].rotation
+                   : sel.kind == Selection::Collider ? m.colliders[size_t(sel.index)].rotation
+                                                     : m.children[size_t(sel.index)].rotation;
         const QQuaternion result = (r * QQuaternion(q[3], q[0], q[1], q[2])).normalized();
         q[0] = result.x();
         q[1] = result.y();
@@ -294,60 +304,62 @@ void ModelViewport::initializeGL()
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(LineVertex), nullptr);
     glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(LineVertex), reinterpret_cast<void*>(3 * sizeof(float)));
     m_lineVao.release();
+
+    m_childVao.create();
+    m_childVao.bind();
+    m_childVbo.create();
+    m_childVbo.setUsagePattern(QOpenGLBuffer::DynamicDraw);
+    m_childVbo.bind();
+    m_childIbo.create();
+    m_childIbo.setUsagePattern(QOpenGLBuffer::DynamicDraw);
+    m_childIbo.bind();
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    m_childVao.release();
     m_glReady = true;
     m_meshDirty = true;
 }
 
 void ModelViewport::resizeGL(int, int) {}
 
-void ModelViewport::rebuildStaticMesh()
+void ModelViewport::SourceMesh::fill(const KModelData& model)
 {
-    m_meshDirty = false;
-    m_srcPos.clear();
-    m_srcNormal.clear();
-    m_srcBones.clear();
-    m_srcWeights.clear();
-    m_srcNode.clear();
-    m_indices.clear();
-
-    const KModelData& model = m_doc->model();
+    *this = {};
     for (size_t meshIndex = 0; meshIndex < model.meshes.size(); ++meshIndex) {
-        int node = -1;
+        int meshNode = -1;
         for (size_t n = 0; n < model.nodes.size(); ++n)
-            if (model.nodes[n].meshIndex == int(meshIndex)) { node = int(n); break; }
+            if (model.nodes[n].meshIndex == int(meshIndex)) { meshNode = int(n); break; }
         const KModelMesh& mesh = model.meshes[meshIndex];
-        const uint32_t base = uint32_t(m_srcNode.size());
+        const uint32_t base = uint32_t(node.size());
         for (const KModelVertex& v : mesh.vertices) {
-            m_srcPos.insert(m_srcPos.end(), {v.px, v.py, v.pz});
-            m_srcNormal.insert(m_srcNormal.end(), {v.nx, v.ny, v.nz});
-            m_srcBones.insert(m_srcBones.end(), std::begin(v.boneIndices), std::end(v.boneIndices));
-            m_srcWeights.insert(m_srcWeights.end(), std::begin(v.boneWeights), std::end(v.boneWeights));
-            m_srcNode.push_back(node);
+            pos.insert(pos.end(), {v.px, v.py, v.pz});
+            normal.insert(normal.end(), {v.nx, v.ny, v.nz});
+            bones.insert(bones.end(), std::begin(v.boneIndices), std::end(v.boneIndices));
+            weights.insert(weights.end(), std::begin(v.boneWeights), std::end(v.boneWeights));
+            node.push_back(meshNode);
         }
-        for (uint32_t i : mesh.indices) m_indices.push_back(base + i);
+        for (uint32_t i : mesh.indices) indices.push_back(base + i);
     }
-    m_skinned.assign(m_srcNode.size() * 6, 0.0f);
-    m_indicesPending = true;
 }
 
-void ModelViewport::skinMesh()
+void ModelViewport::SourceMesh::skin(const KModelData& model, const std::vector<float>& skinMatrices,
+                                     const std::vector<float>& nodeWorld, std::vector<float>& outVerts) const
 {
-    const KModelData& model = m_doc->model();
-    const std::vector<float>& skin = m_preview->skin();
-    const std::vector<float>& world = m_preview->nodeWorld();
-    const bool skinned = !model.bones.empty() && skin.size() >= model.bones.size() * 16;
-
-    for (size_t v = 0; v < m_srcNode.size(); ++v) {
-        const float* p = &m_srcPos[v * 3];
-        const float* n = &m_srcNormal[v * 3];
+    const bool skinned = !model.bones.empty() && skinMatrices.size() >= model.bones.size() * 16;
+    outVerts.resize(node.size() * 6);
+    for (size_t v = 0; v < node.size(); ++v) {
+        const float* p = &pos[v * 3];
+        const float* n = &normal[v * 3];
         float out[6] = {};
         float total = 0.0f;
         if (skinned) {
             for (int k = 0; k < 4; ++k) {
-                const float w = m_srcWeights[v * 4 + k];
-                const uint16_t b = m_srcBones[v * 4 + k];
+                const float w = weights[v * 4 + k];
+                const uint16_t b = bones[v * 4 + k];
                 if (w <= 0.0f || b >= model.bones.size()) continue;
-                const float* m = &skin[size_t(b) * 16];
+                const float* m = &skinMatrices[size_t(b) * 16];
                 const QVector3D tp = transformPoint(m, p[0], p[1], p[2]);
                 out[0] += w * tp.x();
                 out[1] += w * tp.y();
@@ -359,9 +371,9 @@ void ModelViewport::skinMesh()
             }
         }
         if (total <= 0.0f) {
-            const int node = m_srcNode[v];
-            if (node >= 0 && size_t(node + 1) * 16 <= world.size()) {
-                const float* m = &world[size_t(node) * 16];
+            const int nodeIndex = node[v];
+            if (nodeIndex >= 0 && size_t(nodeIndex + 1) * 16 <= nodeWorld.size()) {
+                const float* m = &nodeWorld[size_t(nodeIndex) * 16];
                 const QVector3D tp = transformPoint(m, p[0], p[1], p[2]);
                 out[0] = tp.x(); out[1] = tp.y(); out[2] = tp.z();
                 out[3] = n[0] * m[0] + n[1] * m[4] + n[2] * m[8];
@@ -374,8 +386,143 @@ void ModelViewport::skinMesh()
         } else if (total < 0.999f) {
             for (float& c : out) c /= total;
         }
-        std::copy(out, out + 6, &m_skinned[v * 6]);
+        std::copy(out, out + 6, &outVerts[v * 6]);
     }
+}
+
+std::shared_ptr<const ModelViewport::ChildAsset> ModelViewport::childAsset(const std::string& contentPath)
+{
+    const QFileInfo info(m_preview->resolvePath(QString::fromStdString(contentPath)));
+    const QString key = info.absoluteFilePath();
+    const QDateTime modified = info.exists() ? info.lastModified() : QDateTime();
+    auto it = m_childCache.find(key);
+    if (it != m_childCache.end() && (*it)->modified == modified) return (*it)->ok ? *it : nullptr;
+
+    auto asset = std::make_shared<ChildAsset>();
+    asset->modified = modified;
+    if (info.exists() && LoadKModelFile(key.toUtf8().constData(), asset->model) && !asset->model.meshes.empty()) {
+        asset->ok = true;
+        asset->mesh.fill(asset->model);
+        std::vector<AnimationTransform> bind;
+        BuildAnimationBindPose(asset->model, bind);
+        BuildAnimationWorldMatrices(asset->model, bind, asset->bindWorld);
+        BuildAnimationSkinMatrices(asset->model, bind, asset->bindSkin);
+    }
+    m_childCache.insert(key, asset);
+    return asset->ok ? asset : nullptr;
+}
+
+bool ModelViewport::childMatrix(int index, float out[16]) const
+{
+    const KModelData& model = m_doc->model();
+    if (index < 0 || index >= int(model.children.size())) return false;
+    BuildKModelChildMatrix(model, m_preview->nodeWorld(), model.children[size_t(index)], out);
+    return true;
+}
+
+// child animations use the preview clock, so they only move while playback is running
+bool ModelViewport::childPose(const QString& key, const KModelChild& child, const KModelData& model,
+                              std::vector<AnimationTransform>& outPose)
+{
+    outPose.clear();
+    if (child.animationPath.empty()) {
+        m_childAnimations.remove(key);
+        return false;
+    }
+    ChildAnimation& anim = m_childAnimations[key];
+    if (anim.path != child.animationPath) {
+        anim = {};
+        anim.path = child.animationPath;
+        anim.isTree = IsAnimBlendTreePath(anim.path);
+        if (anim.isTree) {
+            AnimBlendTreeData treeData;
+            const QString file = m_preview->resolvePath(QString::fromStdString(anim.path));
+            if (LoadAnimBlendTreeFile(file.toUtf8().constData(), treeData)) anim.tree.Build(treeData);
+        } else {
+            anim.clip = m_preview->loadClip(QString::fromStdString(anim.path));
+        }
+    }
+
+    const float time = m_preview->childTime();
+    if (!anim.isTree) return anim.clip && SampleAnimationClip(model, *anim.clip, time, outPose);
+    if (!anim.tree.IsBuilt()) return false;
+    float dt = time - anim.lastTime;
+    if (anim.lastTime < 0.0f || dt < 0.0f) {
+        anim.tree.Reset();
+        dt = 0.0f;
+    }
+    anim.lastTime = time;
+    const AnimBlendTreeInstance::ClipResolver clips = [this](const std::string& path) {
+        return m_preview->loadClip(QString::fromStdString(path)).get();
+    };
+    return anim.tree.Evaluate(model, dt, clips, outPose);
+}
+
+void ModelViewport::appendChild(const KModelChild& child, const QString& key, const float matrix[16], bool selected, int depth)
+{
+    const std::shared_ptr<const ChildAsset> asset = childAsset(child.modelPath);
+    if (!asset) return;
+    const KModelData& model = asset->model;
+
+    std::vector<AnimationTransform> pose;
+    std::vector<float> world = asset->bindWorld;
+    if (childPose(key, child, model, pose)) {
+        BuildAnimationWorldMatrices(model, pose, world);
+        BuildAnimationSkinMatrices(model, pose, m_childSkin);
+        asset->mesh.skin(model, m_childSkin, world, m_childSkinned);
+    } else {
+        asset->mesh.skin(model, asset->bindSkin, world, m_childSkinned);
+    }
+
+    const uint32_t base = uint32_t(m_childVerts.size() / 6);
+    for (size_t v = 0; v + 5 < m_childSkinned.size(); v += 6) {
+        const float* p = &m_childSkinned[v];
+        const QVector3D tp = transformPoint(matrix, p[0], p[1], p[2]);
+        const QVector3D n = QVector3D(p[3] * matrix[0] + p[4] * matrix[4] + p[5] * matrix[8],
+                                      p[3] * matrix[1] + p[4] * matrix[5] + p[5] * matrix[9],
+                                      p[3] * matrix[2] + p[4] * matrix[6] + p[5] * matrix[10]).normalized();
+        m_childVerts.insert(m_childVerts.end(), {tp.x(), tp.y(), tp.z(), n.x(), n.y(), n.z()});
+    }
+    const size_t first = m_childIndices.size();
+    for (uint32_t i : asset->mesh.indices) m_childIndices.push_back(base + i);
+    m_childDraws.push_back({first, asset->mesh.indices.size(), selected});
+
+    // same depth limit as the engine, also catches a model that includes itself
+    if (depth >= 3) return;
+    for (size_t i = 0; i < model.children.size(); ++i) {
+        float local[16], placed[16];
+        BuildKModelChildMatrix(model, world, model.children[i], local);
+        MultiplyMatrices(local, matrix, placed);
+        appendChild(model.children[i], QString("%1/%2").arg(key).arg(i), placed, selected, depth + 1);
+    }
+}
+
+void ModelViewport::buildChildMeshes()
+{
+    m_childVerts.clear();
+    m_childIndices.clear();
+    m_childDraws.clear();
+    if (!m_overlays.children) return;
+    const Selection& sel = m_doc->selection();
+    const KModelData& model = m_doc->model();
+    for (size_t i = 0; i < model.children.size(); ++i) {
+        float m[16];
+        childMatrix(int(i), m);
+        appendChild(model.children[i], QString::number(i), m, sel.kind == Selection::Child && sel.index == int(i), 0);
+    }
+}
+
+void ModelViewport::rebuildStaticMesh()
+{
+    m_meshDirty = false;
+    m_src.fill(m_doc->model());
+    m_skinned.assign(m_src.node.size() * 6, 0.0f);
+    m_indicesPending = true;
+}
+
+void ModelViewport::skinMesh()
+{
+    m_src.skin(m_doc->model(), m_preview->skin(), m_preview->nodeWorld(), m_skinned);
 }
 
 void ModelViewport::frameModel()
@@ -547,6 +694,21 @@ void ModelViewport::buildOverlayLines()
             addCollider(int(i), selected ? accent : kColliderColor);
         }
     }
+
+    if (m_overlays.children) {
+        // marker at the child's origin so it can be picked even if its model fails to load
+        const float d = m_radius * 0.02f;
+        for (size_t i = 0; i < model.children.size(); ++i) {
+            float m[16];
+            childMatrix(int(i), m);
+            const QVector3D o(m[12], m[13], m[14]);
+            const bool selected = sel.kind == Selection::Child && sel.index == int(i);
+            const QColor col = selected ? accent : QColor(225, 170, 90);
+            addLine(o - QVector3D(d, 0, 0), o + QVector3D(d, 0, 0), col);
+            addLine(o - QVector3D(0, d, 0), o + QVector3D(0, d, 0), col);
+            addLine(o - QVector3D(0, 0, d), o + QVector3D(0, 0, d), col);
+        }
+    }
     buildGizmoLines();
 }
 
@@ -563,6 +725,7 @@ void ModelViewport::paintGL()
 
     if (m_meshDirty) rebuildStaticMesh();
     skinMesh();
+    buildChildMeshes();
     buildOverlayLines();
     const QMatrix4x4 vp = viewProj();
 
@@ -580,7 +743,7 @@ void ModelViewport::paintGL()
     glDepthMask(GL_TRUE);
     m_lineVao.release();
 
-    if (m_overlays.mesh && !m_indices.empty()) {
+    if (m_overlays.mesh && !m_src.indices.empty()) {
         m_meshProgram.bind();
         m_meshProgram.setUniformValue("uViewProj", vp);
         m_meshProgram.setUniformValue("uColor", QVector3D(0.72f, 0.72f, 0.76f));
@@ -589,11 +752,29 @@ void ModelViewport::paintGL()
         m_meshVbo.allocate(m_skinned.data(), int(m_skinned.size() * sizeof(float)));
         m_meshIbo.bind();
         if (m_indicesPending) {
-            m_meshIbo.allocate(m_indices.data(), int(m_indices.size() * sizeof(uint32_t)));
+            m_meshIbo.allocate(m_src.indices.data(), int(m_src.indices.size() * sizeof(uint32_t)));
             m_indicesPending = false;
         }
-        glDrawElements(GL_TRIANGLES, GLsizei(m_indices.size()), GL_UNSIGNED_INT, nullptr);
+        glDrawElements(GL_TRIANGLES, GLsizei(m_src.indices.size()), GL_UNSIGNED_INT, nullptr);
         m_meshVao.release();
+    }
+
+    if (!m_childDraws.empty()) {
+        m_meshProgram.bind();
+        m_meshProgram.setUniformValue("uViewProj", vp);
+        m_childVao.bind();
+        m_childVbo.bind();
+        m_childVbo.allocate(m_childVerts.data(), int(m_childVerts.size() * sizeof(float)));
+        m_childIbo.bind();
+        m_childIbo.allocate(m_childIndices.data(), int(m_childIndices.size() * sizeof(uint32_t)));
+        const QColor accent = kes::style::accent();
+        const QVector3D selectedColor(float(accent.redF()), float(accent.greenF()), float(accent.blueF()));
+        for (const ChildDraw& draw : m_childDraws) {
+            m_meshProgram.setUniformValue("uColor", draw.selected ? (kChildColor + selectedColor) * 0.5f : kChildColor);
+            glDrawElements(GL_TRIANGLES, GLsizei(draw.indexCount), GL_UNSIGNED_INT,
+                           reinterpret_cast<void*>(draw.firstIndex * sizeof(uint32_t)));
+        }
+        m_childVao.release();
     }
 
     // no depth test so bones inside the mesh stay visible
@@ -647,6 +828,13 @@ void ModelViewport::pick(const QPoint& pos)
             float m[16];
             BuildBoneAttachmentMatrix(model, world, s.boneIndex, s.translation, s.rotation, s.scale, m);
             test({m[12], m[13], m[14]}, Selection::Socket, int(i));
+        }
+    }
+    if (m_overlays.children) {
+        for (size_t i = 0; i < model.children.size(); ++i) {
+            float m[16];
+            childMatrix(int(i), m);
+            test({m[12], m[13], m[14]}, Selection::Child, int(i));
         }
     }
     m_doc->setSelection(best);

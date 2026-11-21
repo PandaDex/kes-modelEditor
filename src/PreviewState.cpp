@@ -139,6 +139,7 @@ void PreviewState::restartGraph()
 void PreviewState::tick()
 {
     const float dt = std::min(float(m_clock.restart()) / 1000.0f, 0.1f);
+    m_childTime += dt * std::max(m_speed, 0.0f);
     if (m_mode == Mode::Clip && m_clip) {
         m_time += dt * m_speed;
         const float d = duration();

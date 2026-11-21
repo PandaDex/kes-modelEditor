@@ -7,13 +7,9 @@ namespace kme {
 
 class AttachmentCommand : public QUndoCommand {
 public:
-    AttachmentCommand(ModelDocument* doc, KModelData before, KModelData after, const QString& text, const QString& mergeKey)
-        : QUndoCommand(text), m_doc(doc), m_mergeKey(mergeKey)
+    AttachmentCommand(ModelDocument* doc, ModelAttachments before, ModelAttachments after, const QString& text, const QString& mergeKey)
+        : QUndoCommand(text), m_doc(doc), m_mergeKey(mergeKey), m_before(std::move(before)), m_after(std::move(after))
     {
-        m_beforeSockets = std::move(before.sockets);
-        m_beforeColliders = std::move(before.colliders);
-        m_afterSockets = std::move(after.sockets);
-        m_afterColliders = std::move(after.colliders);
     }
 
     int id() const override { return m_mergeKey.isEmpty() ? -1 : int(qHash(m_mergeKey) & 0x7fffffff); }
@@ -22,23 +18,21 @@ public:
     {
         auto* o = dynamic_cast<const AttachmentCommand*>(other);
         if (!o || m_mergeKey.isEmpty() || o->m_mergeKey != m_mergeKey) return false;
-        m_afterSockets = o->m_afterSockets;
-        m_afterColliders = o->m_afterColliders;
+        m_after = o->m_after;
         return true;
     }
 
-    void undo() override { m_doc->setAttachments(m_beforeSockets, m_beforeColliders); }
+    void undo() override { m_doc->setAttachments(m_before); }
     void redo() override
     {
         if (m_first) { m_first = false; return; }
-        m_doc->setAttachments(m_afterSockets, m_afterColliders);
+        m_doc->setAttachments(m_after);
     }
 
 private:
     ModelDocument* m_doc;
     QString m_mergeKey;
-    std::vector<KModelSocket> m_beforeSockets, m_afterSockets;
-    std::vector<KModelCollider> m_beforeColliders, m_afterColliders;
+    ModelAttachments m_before, m_after;
     bool m_first = true;
 };
 
@@ -89,23 +83,26 @@ void ModelDocument::close()
 void ModelDocument::edit(const QString& text, const std::function<void(KModelData&)>& fn, const QString& mergeKey)
 {
     if (!isOpen()) return;
-    KModelData before;
-    before.sockets = m_model.sockets;
-    before.colliders = m_model.colliders;
+    ModelAttachments before = attachments();
     fn(m_model);
-    KModelData after;
-    after.sockets = m_model.sockets;
-    after.colliders = m_model.colliders;
-    m_undo.push(new AttachmentCommand(this, std::move(before), std::move(after), text, mergeKey));
+    m_undo.push(new AttachmentCommand(this, std::move(before), attachments(), text, mergeKey));
     emit attachmentsChanged();
 }
 
-void ModelDocument::setAttachments(const std::vector<KModelSocket>& sockets, const std::vector<KModelCollider>& colliders)
+ModelAttachments ModelDocument::attachments() const
 {
-    m_model.sockets = sockets;
-    m_model.colliders = colliders;
-    if ((m_selection.kind == Selection::Socket && m_selection.index >= int(sockets.size())) ||
-        (m_selection.kind == Selection::Collider && m_selection.index >= int(colliders.size()))) {
+    return {m_model.sockets, m_model.colliders, m_model.children, m_model.defaultMaterial};
+}
+
+void ModelDocument::setAttachments(const ModelAttachments& a)
+{
+    m_model.sockets = a.sockets;
+    m_model.colliders = a.colliders;
+    m_model.children = a.children;
+    m_model.defaultMaterial = a.defaultMaterial;
+    if ((m_selection.kind == Selection::Socket && m_selection.index >= int(a.sockets.size())) ||
+        (m_selection.kind == Selection::Collider && m_selection.index >= int(a.colliders.size())) ||
+        (m_selection.kind == Selection::Child && m_selection.index >= int(a.children.size()))) {
         m_selection = {};
         emit selectionChanged();
     }
@@ -136,6 +133,20 @@ QString ModelDocument::uniqueSocketName(const QString& base) const
     const auto taken = [&](const QString& n) {
         for (const KModelSocket& s : m_model.sockets)
             if (QString::fromStdString(s.name) == n) return true;
+        return false;
+    };
+    if (!taken(base)) return base;
+    for (int i = 1;; ++i) {
+        const QString n = QString("%1_%2").arg(base).arg(i);
+        if (!taken(n)) return n;
+    }
+}
+
+QString ModelDocument::uniqueChildName(const QString& base) const
+{
+    const auto taken = [&](const QString& n) {
+        for (const KModelChild& c : m_model.children)
+            if (QString::fromStdString(c.name) == n) return true;
         return false;
     };
     if (!taken(base)) return base;

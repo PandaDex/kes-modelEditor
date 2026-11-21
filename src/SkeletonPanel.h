@@ -9,14 +9,16 @@ class QTreeWidgetItem;
 namespace kme {
 
 class ModelDocument;
+class PreviewState;
 
 class SkeletonPanel : public QWidget {
     Q_OBJECT
 public:
-    explicit SkeletonPanel(ModelDocument* doc, QWidget* parent = nullptr);
+    SkeletonPanel(ModelDocument* doc, const PreviewState* preview, QWidget* parent = nullptr);
 
     void addSocket();
     void addCollider();
+    void addChildModel();
     void deleteSelected();
 
 private:
@@ -28,6 +30,7 @@ private:
     int selectedBone() const;
 
     ModelDocument* m_doc;
+    const PreviewState* m_preview;
     QTreeWidget* m_tree;
     QLineEdit* m_filter;
     bool m_syncing = false;

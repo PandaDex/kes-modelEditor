@@ -101,10 +101,10 @@ void MainWindow::buildUi()
         return d;
     };
 
-    m_skeleton = new SkeletonPanel(m_doc);
+    m_skeleton = new SkeletonPanel(m_doc, m_preview);
     dock("Skeleton", "SkeletonDock", m_skeleton, Qt::LeftDockWidgetArea);
 
-    m_attachments = new AttachmentPanel(m_doc);
+    m_attachments = new AttachmentPanel(m_doc, m_preview);
     m_propertiesDock = dock("Properties", "PropertiesDock", scrolled(m_attachments), Qt::RightDockWidgetArea);
     m_inspector = new InspectorWidget(m_graph);
     m_inspectorDock = dock("Node", "NodeDock", scrolled(m_inspector), Qt::RightDockWidgetArea);
@@ -240,6 +240,7 @@ void MainWindow::buildActions()
     QMenu* model = menuBar()->addMenu("&Model");
     model->addAction(make("Add &Socket", QKeySequence("Ctrl+Shift+S"), [this] { m_skeleton->addSocket(); }, "plus"));
     model->addAction(make("Add &Collider", QKeySequence("Ctrl+Shift+C"), [this] { m_skeleton->addCollider(); }, "plus"));
+    model->addAction(make("Attach &Model…", QKeySequence("Ctrl+Shift+M"), [this] { m_skeleton->addChildModel(); }, "plus"));
     model->addSeparator();
     model->addAction(make("&Frame Model", QKeySequence(), [this] {
         m_modelView->frameModel();
@@ -309,6 +310,7 @@ void MainWindow::buildActions()
     overlay("Show S&keleton", &ModelViewport::Overlays::skeleton);
     overlay("Show &Sockets", &ModelViewport::Overlays::sockets);
     overlay("Show &Colliders", &ModelViewport::Overlays::colliders);
+    overlay("Show C&hild Models", &ModelViewport::Overlays::children);
     overlay("Show &Grid", &ModelViewport::Overlays::grid);
     view->addSeparator();
     for (QDockWidget* d : findChildren<QDockWidget*>()) view->addAction(d->toggleViewAction());

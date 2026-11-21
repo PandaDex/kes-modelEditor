@@ -1,5 +1,11 @@
 #pragma once
 
+#include "anim_blend_tree.h"
+#include "animation_clip.h"
+#include "kmodel.h"
+
+#include <QDateTime>
+#include <QHash>
 #include <QMatrix4x4>
 #include <QOpenGLBuffer>
 #include <QOpenGLFunctions_3_3_Core>
@@ -7,6 +13,7 @@
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
 #include <QVector3D>
+#include <memory>
 #include <vector>
 
 namespace kme {
@@ -24,6 +31,7 @@ public:
         bool skeleton = true;
         bool sockets = true;
         bool colliders = true;
+        bool children = true;
         bool grid = true;
     };
 
@@ -54,6 +62,45 @@ private:
         float x, y, z, r, g, b, a;
     };
 
+    // unskinned vertices of all meshes, skin() outputs pos + normal
+    struct SourceMesh {
+        std::vector<float> pos, normal;
+        std::vector<uint16_t> bones;
+        std::vector<float> weights;
+        std::vector<int> node;
+        std::vector<uint32_t> indices;
+        void fill(const KModelData& model);
+        void skin(const KModelData& model, const std::vector<float>& skinMatrices, const std::vector<float>& nodeWorld,
+                  std::vector<float>& out) const;
+    };
+
+    struct ChildAsset {
+        bool ok = false;
+        QDateTime modified;
+        KModelData model;
+        SourceMesh mesh;
+        std::vector<float> bindWorld, bindSkin;
+    };
+    // keyed by child index path, e.g. "0/2" = child 2 of child 0
+    struct ChildAnimation {
+        std::string path;
+        bool isTree = false;
+        AnimBlendTreeInstance tree;
+        std::shared_ptr<AnimationClipData> clip;
+        float lastTime = -1.0f;
+        std::vector<AnimationTransform> pose;
+    };
+    struct ChildDraw {
+        size_t firstIndex;
+        size_t indexCount;
+        bool selected;
+    };
+    std::shared_ptr<const ChildAsset> childAsset(const std::string& contentPath);
+    bool childPose(const QString& key, const KModelChild& child, const KModelData& model, std::vector<AnimationTransform>& outPose);
+    void appendChild(const KModelChild& child, const QString& key, const float matrix[16], bool selected, int depth);
+    void buildChildMeshes();
+    bool childMatrix(int index, float out[16]) const;
+
     void rebuildStaticMesh();
     void skinMesh();
     void buildOverlayLines();
@@ -83,7 +130,15 @@ private:
 
     QOpenGLShaderProgram m_meshProgram;
     QOpenGLShaderProgram m_lineProgram;
-    QOpenGLVertexArrayObject m_meshVao, m_lineVao;
+    QOpenGLVertexArrayObject m_meshVao, m_lineVao, m_childVao;
+    QOpenGLBuffer m_childVbo{QOpenGLBuffer::VertexBuffer};
+    QOpenGLBuffer m_childIbo{QOpenGLBuffer::IndexBuffer};
+    QHash<QString, std::shared_ptr<ChildAsset>> m_childCache;
+    QHash<QString, ChildAnimation> m_childAnimations;
+    std::vector<float> m_childSkinned, m_childWorld, m_childSkin;
+    std::vector<float> m_childVerts; // pos + normal
+    std::vector<uint32_t> m_childIndices;
+    std::vector<ChildDraw> m_childDraws;
     QOpenGLBuffer m_meshVbo{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer m_meshIbo{QOpenGLBuffer::IndexBuffer};
     QOpenGLBuffer m_lineVbo{QOpenGLBuffer::VertexBuffer};
@@ -91,12 +146,8 @@ private:
     bool m_meshDirty = true;
     bool m_indicesPending = false;
 
-    std::vector<float> m_srcPos, m_srcNormal;
-    std::vector<uint16_t> m_srcBones;
-    std::vector<float> m_srcWeights;
-    std::vector<int> m_srcNode;
+    SourceMesh m_src;
     std::vector<float> m_skinned; // pos + normal
-    std::vector<uint32_t> m_indices;
     std::vector<LineVertex> m_lines;
     size_t m_gridLineCount = 0;
 
