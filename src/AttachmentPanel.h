@@ -3,6 +3,7 @@
 #include <QVector3D>
 #include <QWidget>
 #include <functional>
+#include <vector>
 
 class QComboBox;
 class QDoubleSpinBox;
@@ -61,6 +62,7 @@ private:
     void buildCollider(QFormLayout* form, int index);
     void buildNode(QVBoxLayout* lay, int index);
     void buildModel(QVBoxLayout* lay);
+    void buildMaterialSlots(QVBoxLayout* lay, std::vector<std::function<void()>>& refreshers);
     void buildChild(QFormLayout* form, int index);
     QComboBox* boneCombo(int current);
     void fitColliderToBone(int index);

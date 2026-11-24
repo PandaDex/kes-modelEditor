@@ -18,12 +18,15 @@ struct Selection {
     bool operator!=(const Selection& o) const { return !(*this == o); }
 };
 
-// The parts of a .kmodel the editor can change. Mesh and skeleton come from the import.
+// The parts of a .kmodel the editor can change. Mesh and skeleton come from the import,
+// except which material slot each primitive uses.
 struct ModelAttachments {
     std::vector<KModelSocket> sockets;
     std::vector<KModelCollider> colliders;
     std::vector<KModelChild> children;
     std::string defaultMaterial;
+    std::vector<KModelMaterial> materials;
+    std::vector<std::vector<int32_t>> primitiveSlots; // [mesh][primitive]
 };
 
 class ModelDocument : public QObject {
@@ -51,6 +54,7 @@ public:
     QString boneName(int boneIndex) const;
     QString uniqueSocketName(const QString& base) const;
     QString uniqueChildName(const QString& base) const;
+    QString uniqueSlotName(const QString& base) const;
 
 signals:
     void modelReset();

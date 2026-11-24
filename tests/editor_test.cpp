@@ -135,6 +135,18 @@ int main(int argc, char** argv)
     doc.undoStack()->redo();
     doc.undoStack()->redo();
     EXPECT(doc.model().children.size() == 1 && doc.model().defaultMaterial == "materials/skin.mat");
+
+    const std::string slotName = doc.uniqueSlotName("glass").toStdString();
+    doc.edit("Add material slot", [&](KModelData& m) { m.materials.push_back({slotName, "materials/glass.mat"}); });
+    doc.edit("Assign material slot", [&](KModelData& m) { m.meshes[0].primitives[0].materialIndex = 0; });
+    EXPECT(doc.uniqueSlotName("glass") == "glass_1");
+    doc.undoStack()->undo();
+    EXPECT(doc.model().meshes[0].primitives[0].materialIndex == -1);
+    doc.undoStack()->undo();
+    EXPECT(doc.model().materials.empty());
+    doc.undoStack()->redo();
+    doc.undoStack()->redo();
+    EXPECT(doc.model().materials.size() == 1 && doc.model().meshes[0].primitives[0].materialIndex == 0);
     EXPECT(doc.isModified());
     EXPECT(doc.save(&error));
     EXPECT(!doc.isModified());
@@ -147,6 +159,8 @@ int main(int argc, char** argv)
     EXPECT(saved.children.size() == 1 && saved.children[0].modelPath == "models/gun.kmodel" && saved.children[0].boneIndex == upper &&
            saved.children[0].animationPath == "anims/gun_idle.kanim");
     EXPECT(saved.defaultMaterial == "materials/skin.mat");
+    EXPECT(saved.materials.size() == 1 && saved.materials[0].materialPath == "materials/glass.mat");
+    EXPECT(saved.meshes[0].primitives[0].materialIndex == 0);
 
     kme::GraphModel graph;
     const int clip = graph.addNode("Clip", {0, 0});

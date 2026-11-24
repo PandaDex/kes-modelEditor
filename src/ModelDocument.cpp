@@ -91,7 +91,12 @@ void ModelDocument::edit(const QString& text, const std::function<void(KModelDat
 
 ModelAttachments ModelDocument::attachments() const
 {
-    return {m_model.sockets, m_model.colliders, m_model.children, m_model.defaultMaterial};
+    ModelAttachments a{m_model.sockets, m_model.colliders, m_model.children, m_model.defaultMaterial, m_model.materials, {}};
+    for (const KModelMesh& mesh : m_model.meshes) {
+        std::vector<int32_t>& ids = a.primitiveSlots.emplace_back();
+        for (const KModelPrimitive& primitive : mesh.primitives) ids.push_back(primitive.materialIndex);
+    }
+    return a;
 }
 
 void ModelDocument::setAttachments(const ModelAttachments& a)
@@ -100,6 +105,12 @@ void ModelDocument::setAttachments(const ModelAttachments& a)
     m_model.colliders = a.colliders;
     m_model.children = a.children;
     m_model.defaultMaterial = a.defaultMaterial;
+    m_model.materials = a.materials;
+    for (size_t m = 0; m < m_model.meshes.size() && m < a.primitiveSlots.size(); ++m) {
+        std::vector<KModelPrimitive>& primitives = m_model.meshes[m].primitives;
+        for (size_t p = 0; p < primitives.size() && p < a.primitiveSlots[m].size(); ++p)
+            primitives[p].materialIndex = a.primitiveSlots[m][p];
+    }
     if ((m_selection.kind == Selection::Socket && m_selection.index >= int(a.sockets.size())) ||
         (m_selection.kind == Selection::Collider && m_selection.index >= int(a.colliders.size())) ||
         (m_selection.kind == Selection::Child && m_selection.index >= int(a.children.size()))) {
@@ -149,6 +160,16 @@ QString ModelDocument::uniqueChildName(const QString& base) const
             if (QString::fromStdString(c.name) == n) return true;
         return false;
     };
+    if (!taken(base)) return base;
+    for (int i = 1;; ++i) {
+        const QString n = QString("%1_%2").arg(base).arg(i);
+        if (!taken(n)) return n;
+    }
+}
+
+QString ModelDocument::uniqueSlotName(const QString& base) const
+{
+    const auto taken = [&](const QString& n) { return FindKModelMaterialSlot(m_model, n.toStdString().c_str()) >= 0; };
     if (!taken(base)) return base;
     for (int i = 1;; ++i) {
         const QString n = QString("%1_%2").arg(base).arg(i);

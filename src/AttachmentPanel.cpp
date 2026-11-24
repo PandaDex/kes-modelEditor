@@ -19,6 +19,7 @@
 #include <QPushButton>
 #include <QQuaternion>
 #include <QSignalBlocker>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cfloat>
@@ -230,20 +231,154 @@ void AttachmentPanel::buildModel(QVBoxLayout* lay)
     auto* material = new PathEdit(m_preview, "Default Material", "Materials (*.mat)");
     material->setPlaceholder("(none: white)");
     form->addRow("Default material", material);
-    lay->addWidget(note("Used wherever this model is placed without its own Material. A Material set on the entity "
-                        "(Forge's Material field) replaces it; child models keep theirs."));
+    lay->addWidget(note("Used wherever this model is placed without its own Material, for every part whose slot has "
+                        "no material. A Material set on the entity (Forge's Material field) replaces it; child models "
+                        "keep theirs."));
     connect(material, &PathEdit::edited, this, [this](const QString& path) {
         if (path.toStdString() == m_doc->model().defaultMaterial) return;
         m_editing = true;
         m_doc->edit("Set default material", [&](KModelData& m) { m.defaultMaterial = path.toStdString(); });
         m_editing = false;
     });
-    m_refresh = [=, this] { material->setPath(QString::fromStdString(m_doc->model().defaultMaterial)); };
+
+    std::vector<std::function<void()>> refreshers;
+    refreshers.push_back([=, this] { material->setPath(QString::fromStdString(m_doc->model().defaultMaterial)); });
+    buildMaterialSlots(lay, refreshers);
+    const size_t builtSlots = m_doc->model().materials.size();
+    m_refresh = [this, refreshers, builtSlots] {
+        // adding or removing a slot (or undoing it) changes the rows, so build them again
+        if (m_doc->model().materials.size() != builtSlots) {
+            QTimer::singleShot(0, this, &AttachmentPanel::rebuild);
+            return;
+        }
+        for (const auto& refresh : refreshers) refresh();
+    };
     m_refresh();
 
     lay->addSpacing(12);
     lay->addWidget(note("Select a bone, socket, collider or child model in the Skeleton panel or click one in the viewport.\n\n"
                         "Left-drag: orbit   Shift/middle-drag: pan\nWheel or right-drag: zoom   F: frame"));
+}
+
+// Slots (name + material) and, per mesh part, which slot it draws with.
+void AttachmentPanel::buildMaterialSlots(QVBoxLayout* lay, std::vector<std::function<void()>>& refreshers)
+{
+    lay->addSpacing(10);
+    auto* header = new QHBoxLayout;
+    auto* title = new QLabel("Material slots");
+    title->setObjectName("Title");
+    auto* add = new QPushButton("+ Slot");
+    add->setToolTip("Add a material slot, then pick it for a mesh part below");
+    header->addWidget(title);
+    header->addStretch(1);
+    header->addWidget(add);
+    lay->addLayout(header);
+    connect(add, &QPushButton::clicked, this, [this] {
+        const std::string name = m_doc->uniqueSlotName("Slot").toStdString();
+        m_doc->edit("Add material slot", [&](KModelData& m) { m.materials.push_back({name, {}}); });
+    });
+
+    const auto slotList = [this]() -> const std::vector<KModelMaterial>& { return m_doc->model().materials; };
+    auto* form = new QFormLayout;
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    lay->addLayout(form);
+    for (int index = 0; index < int(slotList().size()); ++index) {
+        auto* row = new QWidget;
+        auto* h = new QHBoxLayout(row);
+        h->setContentsMargins(0, 0, 0, 0);
+        auto* name = new QLineEdit;
+        name->setFixedWidth(110);
+        name->setToolTip("Slot name. Forge overrides a slot with an entity key Material.<name>, so renaming "
+                         "drops those overrides.");
+        auto* path = new PathEdit(m_preview, "Slot Material", "Materials (*.mat)");
+        path->setPlaceholder("(Material / default)");
+        auto* remove = new QToolButton;
+        remove->setText("x");
+        remove->setToolTip("Remove the slot; its parts fall back to the Material / default material");
+        h->addWidget(name);
+        h->addWidget(path, 1);
+        h->addWidget(remove);
+        form->addRow(QString::number(index), row);
+
+        connect(name, &QLineEdit::editingFinished, this, [this, name, index] {
+            const QString n = name->text().trimmed();
+            if (n.isEmpty() || n.toStdString() == m_doc->model().materials[size_t(index)].name) {
+                name->setText(QString::fromStdString(m_doc->model().materials[size_t(index)].name));
+                return;
+            }
+            const std::string unique = m_doc->uniqueSlotName(n).toStdString();
+            m_doc->edit("Rename material slot", [&](KModelData& m) { m.materials[size_t(index)].name = unique; });
+        });
+        connect(path, &PathEdit::edited, this, [this, index](const QString& p) {
+            if (p.toStdString() == m_doc->model().materials[size_t(index)].materialPath) return;
+            m_editing = true;
+            m_doc->edit("Set slot material", [&](KModelData& m) { m.materials[size_t(index)].materialPath = p.toStdString(); });
+            m_editing = false;
+        });
+        connect(remove, &QToolButton::clicked, this, [this, index] {
+            m_doc->edit("Remove material slot", [&](KModelData& m) {
+                m.materials.erase(m.materials.begin() + index);
+                for (KModelMesh& mesh : m.meshes) {
+                    for (KModelPrimitive& primitive : mesh.primitives) {
+                        if (primitive.materialIndex == index) primitive.materialIndex = -1;
+                        else if (primitive.materialIndex > index) --primitive.materialIndex;
+                    }
+                }
+            });
+        });
+        refreshers.push_back([this, name, path, index] {
+            const KModelMaterial& slot = m_doc->model().materials[size_t(index)];
+            if (!name->hasFocus()) name->setText(QString::fromStdString(slot.name));
+            path->setPath(QString::fromStdString(slot.materialPath));
+        });
+    }
+    if (slotList().empty()) lay->addWidget(note("No slots: the whole model uses one material."));
+
+    const KModelData& model = m_doc->model();
+    bool anyPart = false;
+    auto* parts = new QFormLayout;
+    parts->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    for (int m = 0; m < int(model.meshes.size()); ++m) {
+        const KModelMesh& mesh = model.meshes[size_t(m)];
+        for (int p = 0; p < int(mesh.primitives.size()); ++p) {
+            anyPart = true;
+            QString label = QString::fromStdString(mesh.name);
+            if (label.isEmpty()) label = QString("Mesh %1").arg(m);
+            if (mesh.primitives.size() > 1) label += QString(" / %1").arg(p);
+            auto* combo = new QComboBox;
+            combo->setToolTip(QString("%1 triangles").arg(mesh.primitives[size_t(p)].indexCount / 3));
+            parts->addRow(label, combo);
+            const auto fill = [this, combo, m, p] {
+                const QSignalBlocker block(combo);
+                const KModelData& md = m_doc->model();
+                combo->clear();
+                combo->addItem("(no slot)", -1);
+                for (int s = 0; s < int(md.materials.size()); ++s)
+                    combo->addItem(QString::fromStdString(md.materials[size_t(s)].name), s);
+                combo->setCurrentIndex(std::max(0, combo->findData(md.meshes[size_t(m)].primitives[size_t(p)].materialIndex)));
+            };
+            fill();
+            refreshers.push_back(fill);
+            connect(combo, &QComboBox::activated, this, [this, combo, m, p](int item) {
+                const int slot = combo->itemData(item).toInt();
+                if (slot == m_doc->model().meshes[size_t(m)].primitives[size_t(p)].materialIndex) return;
+                m_doc->edit("Assign material slot",
+                            [&](KModelData& md) { md.meshes[size_t(m)].primitives[size_t(p)].materialIndex = slot; });
+            });
+        }
+    }
+    if (anyPart) {
+        lay->addSpacing(6);
+        auto* partsTitle = new QLabel("Mesh parts");
+        partsTitle->setObjectName("Title");
+        lay->addWidget(partsTitle);
+        lay->addLayout(parts);
+        lay->addWidget(note("Each part draws with its slot's material. A part with no slot, or a slot with no material, "
+                            "uses the entity Material, then the default material. Forge can override one slot per entity "
+                            "(Material.<slot>)."));
+    } else {
+        delete parts;
+    }
 }
 
 void AttachmentPanel::buildChild(QFormLayout* form, int index)
