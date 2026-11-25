@@ -10,9 +10,11 @@
 #include <QOpenGLBuffer>
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLShaderProgram>
+#include <QOpenGLTexture>
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
 #include <QVector3D>
+#include <QVector4D>
 #include <memory>
 #include <vector>
 
@@ -62,13 +64,23 @@ private:
         float x, y, z, r, g, b, a;
     };
 
-    // unskinned vertices of all meshes, skin() outputs pos + normal
+    // a run of indices drawn with one material; the slot is looked up at draw time
+    // because the editor changes primitive slots without a model reset
+    struct Section {
+        size_t firstIndex;
+        size_t indexCount;
+        int mesh;
+        int primitive; // -1 = mesh has no primitives
+        int slot(const KModelData& model) const;
+    };
+    // unskinned vertices of all meshes, skin() outputs pos + normal + uv
     struct SourceMesh {
-        std::vector<float> pos, normal;
+        std::vector<float> pos, normal, uv;
         std::vector<uint16_t> bones;
         std::vector<float> weights;
         std::vector<int> node;
         std::vector<uint32_t> indices;
+        std::vector<Section> sections;
         void fill(const KModelData& model);
         void skin(const KModelData& model, const std::vector<float>& skinMatrices, const std::vector<float>& nodeWorld,
                   std::vector<float>& out) const;
@@ -94,7 +106,17 @@ private:
         size_t firstIndex;
         size_t indexCount;
         bool selected;
+        std::string materialPath;
     };
+    struct MaterialEntry {
+        QDateTime modified, textureModified;
+        bool ok = false;
+        QVector4D baseColor{1, 1, 1, 1};
+        QString texturePath;
+        std::unique_ptr<QOpenGLTexture> texture;
+    };
+    const MaterialEntry* material(const std::string& contentPath);
+    void bindMaterial(const std::string& contentPath, const QVector3D& fallback, const QVector3D* highlight);
     std::shared_ptr<const ChildAsset> childAsset(const std::string& contentPath);
     bool childPose(const QString& key, const KModelChild& child, const KModelData& model, std::vector<AnimationTransform>& outPose);
     void appendChild(const KModelChild& child, const QString& key, const float matrix[16], bool selected, int depth);
@@ -136,7 +158,9 @@ private:
     QHash<QString, std::shared_ptr<ChildAsset>> m_childCache;
     QHash<QString, ChildAnimation> m_childAnimations;
     std::vector<float> m_childSkinned, m_childWorld, m_childSkin;
-    std::vector<float> m_childVerts; // pos + normal
+    std::vector<float> m_childVerts; // pos + normal + uv
+    QHash<QString, std::shared_ptr<MaterialEntry>> m_materials;
+    std::unique_ptr<QOpenGLTexture> m_whiteTexture;
     std::vector<uint32_t> m_childIndices;
     std::vector<ChildDraw> m_childDraws;
     QOpenGLBuffer m_meshVbo{QOpenGLBuffer::VertexBuffer};
@@ -147,7 +171,7 @@ private:
     bool m_indicesPending = false;
 
     SourceMesh m_src;
-    std::vector<float> m_skinned; // pos + normal
+    std::vector<float> m_skinned; // pos + normal + uv
     std::vector<LineVertex> m_lines;
     size_t m_gridLineCount = 0;
 

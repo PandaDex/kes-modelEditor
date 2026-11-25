@@ -1,6 +1,7 @@
 #include "ModelViewport.h"
 
 #include "KesStyle.h"
+#include "MaterialPreview.h"
 #include "ModelDocument.h"
 #include "PreviewState.h"
 #include "animation_pose.h"
@@ -22,22 +23,30 @@ namespace {
 const char* kMeshVs = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUv;
 uniform mat4 uViewProj;
 out vec3 vNormal;
-void main() { vNormal = aNormal; gl_Position = uViewProj * vec4(aPos, 1.0); }
+out vec2 vUv;
+void main() { vNormal = aNormal; vUv = aUv; gl_Position = uViewProj * vec4(aPos, 1.0); }
 )";
 
 const char* kMeshFs = R"(#version 330 core
 in vec3 vNormal;
+in vec2 vUv;
 uniform vec3 uColor;
+uniform sampler2D uTexture;
 out vec4 oColor;
 void main() {
     vec3 n = normalize(gl_FrontFacing ? vNormal : -vNormal);
     float key = max(dot(n, normalize(vec3(0.45, 0.8, 0.4))), 0.0);
     float rim = max(dot(n, normalize(vec3(-0.5, 0.25, -0.7))), 0.0);
-    oColor = vec4(uColor * (0.22 + 0.68 * key + 0.25 * rim), 1.0);
+    vec3 albedo = uColor * texture(uTexture, vUv).rgb;
+    oColor = vec4(albedo * (0.22 + 0.68 * key + 0.25 * rim), 1.0);
 }
 )";
+
+constexpr int kMeshStride = 8; // pos, normal, uv
+const QVector3D kMeshColor(0.72f, 0.72f, 0.76f);
 
 const char* kLineVs = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
@@ -92,6 +101,8 @@ ModelViewport::ModelViewport(ModelDocument* doc, PreviewState* preview, QWidget*
 ModelViewport::~ModelViewport()
 {
     makeCurrent();
+    m_materials.clear();
+    m_whiteTexture.reset();
     m_meshVbo.destroy();
     m_meshIbo.destroy();
     m_lineVbo.destroy();
@@ -290,8 +301,10 @@ void ModelViewport::initializeGL()
     m_meshIbo.bind();
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, kMeshStride * sizeof(float), nullptr);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, kMeshStride * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, kMeshStride * sizeof(float), reinterpret_cast<void*>(6 * sizeof(float)));
     m_meshVao.release();
 
     m_lineVao.create();
@@ -315,9 +328,15 @@ void ModelViewport::initializeGL()
     m_childIbo.bind();
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, kMeshStride * sizeof(float), nullptr);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, kMeshStride * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, kMeshStride * sizeof(float), reinterpret_cast<void*>(6 * sizeof(float)));
     m_childVao.release();
+
+    QImage white(1, 1, QImage::Format_RGBA8888);
+    white.fill(Qt::white);
+    m_whiteTexture = std::make_unique<QOpenGLTexture>(white);
     m_glReady = true;
     m_meshDirty = true;
 }
@@ -333,9 +352,20 @@ void ModelViewport::SourceMesh::fill(const KModelData& model)
             if (model.nodes[n].meshIndex == int(meshIndex)) { meshNode = int(n); break; }
         const KModelMesh& mesh = model.meshes[meshIndex];
         const uint32_t base = uint32_t(node.size());
+        const size_t firstIndex = indices.size();
+        if (mesh.primitives.empty()) {
+            sections.push_back({firstIndex, mesh.indices.size(), int(meshIndex), -1});
+        } else {
+            for (size_t p = 0; p < mesh.primitives.size(); ++p) {
+                const KModelPrimitive& prim = mesh.primitives[p];
+                if (size_t(prim.firstIndex) + prim.indexCount > mesh.indices.size()) continue;
+                sections.push_back({firstIndex + prim.firstIndex, prim.indexCount, int(meshIndex), int(p)});
+            }
+        }
         for (const KModelVertex& v : mesh.vertices) {
             pos.insert(pos.end(), {v.px, v.py, v.pz});
             normal.insert(normal.end(), {v.nx, v.ny, v.nz});
+            uv.insert(uv.end(), {v.u, v.v});
             bones.insert(bones.end(), std::begin(v.boneIndices), std::end(v.boneIndices));
             weights.insert(weights.end(), std::begin(v.boneWeights), std::end(v.boneWeights));
             node.push_back(meshNode);
@@ -344,15 +374,24 @@ void ModelViewport::SourceMesh::fill(const KModelData& model)
     }
 }
 
+int ModelViewport::Section::slot(const KModelData& model) const
+{
+    if (mesh < 0 || size_t(mesh) >= model.meshes.size() || primitive < 0) return -1;
+    const std::vector<KModelPrimitive>& prims = model.meshes[size_t(mesh)].primitives;
+    return size_t(primitive) < prims.size() ? prims[size_t(primitive)].materialIndex : -1;
+}
+
 void ModelViewport::SourceMesh::skin(const KModelData& model, const std::vector<float>& skinMatrices,
                                      const std::vector<float>& nodeWorld, std::vector<float>& outVerts) const
 {
     const bool skinned = !model.bones.empty() && skinMatrices.size() >= model.bones.size() * 16;
-    outVerts.resize(node.size() * 6);
+    outVerts.resize(node.size() * kMeshStride);
     for (size_t v = 0; v < node.size(); ++v) {
         const float* p = &pos[v * 3];
         const float* n = &normal[v * 3];
-        float out[6] = {};
+        float out[kMeshStride] = {};
+        out[6] = uv[v * 2];
+        out[7] = uv[v * 2 + 1];
         float total = 0.0f;
         if (skinned) {
             for (int k = 0; k < 4; ++k) {
@@ -384,9 +423,9 @@ void ModelViewport::SourceMesh::skin(const KModelData& model, const std::vector<
                 std::copy(n, n + 3, out + 3);
             }
         } else if (total < 0.999f) {
-            for (float& c : out) c /= total;
+            for (int c = 0; c < 6; ++c) out[c] /= total;
         }
-        std::copy(out, out + 6, &outVerts[v * 6]);
+        std::copy(out, out + kMeshStride, &outVerts[v * kMeshStride]);
     }
 }
 
@@ -474,18 +513,25 @@ void ModelViewport::appendChild(const KModelChild& child, const QString& key, co
         asset->mesh.skin(model, asset->bindSkin, world, m_childSkinned);
     }
 
-    const uint32_t base = uint32_t(m_childVerts.size() / 6);
-    for (size_t v = 0; v + 5 < m_childSkinned.size(); v += 6) {
+    const uint32_t base = uint32_t(m_childVerts.size() / kMeshStride);
+    for (size_t v = 0; v + kMeshStride <= m_childSkinned.size(); v += kMeshStride) {
         const float* p = &m_childSkinned[v];
         const QVector3D tp = transformPoint(matrix, p[0], p[1], p[2]);
         const QVector3D n = QVector3D(p[3] * matrix[0] + p[4] * matrix[4] + p[5] * matrix[8],
                                       p[3] * matrix[1] + p[4] * matrix[5] + p[5] * matrix[9],
                                       p[3] * matrix[2] + p[4] * matrix[6] + p[5] * matrix[10]).normalized();
-        m_childVerts.insert(m_childVerts.end(), {tp.x(), tp.y(), tp.z(), n.x(), n.y(), n.z()});
+        m_childVerts.insert(m_childVerts.end(), {tp.x(), tp.y(), tp.z(), n.x(), n.y(), n.z(), p[6], p[7]});
     }
     const size_t first = m_childIndices.size();
     for (uint32_t i : asset->mesh.indices) m_childIndices.push_back(base + i);
-    m_childDraws.push_back({first, asset->mesh.indices.size(), selected});
+    // same precedence as the engine: slot > child materialPath > child model default
+    for (const Section& section : asset->mesh.sections) {
+        std::string path;
+        const int slot = section.slot(model);
+        if (slot >= 0 && size_t(slot) < model.materials.size()) path = model.materials[size_t(slot)].materialPath;
+        if (path.empty()) path = !child.materialPath.empty() ? child.materialPath : model.defaultMaterial;
+        m_childDraws.push_back({first + section.firstIndex, section.indexCount, selected, path});
+    }
 
     // same depth limit as the engine, also catches a model that includes itself
     if (depth >= 3) return;
@@ -512,11 +558,52 @@ void ModelViewport::buildChildMeshes()
     }
 }
 
+// reloads when the .mat or its texture changes on disk, so edits in other tools show up
+const ModelViewport::MaterialEntry* ModelViewport::material(const std::string& contentPath)
+{
+    if (contentPath.empty()) return nullptr;
+    const QFileInfo info(m_preview->resolvePath(QString::fromStdString(contentPath)));
+    const QString key = info.absoluteFilePath();
+    const QDateTime modified = info.exists() ? info.lastModified() : QDateTime();
+    std::shared_ptr<MaterialEntry>& entry = m_materials[key];
+    if (entry && entry->modified == modified) {
+        if (entry->texturePath.isEmpty() || QFileInfo(entry->texturePath).lastModified() == entry->textureModified)
+            return entry->ok ? entry.get() : nullptr;
+    }
+
+    entry = std::make_shared<MaterialEntry>();
+    entry->modified = modified;
+    PreviewMaterial mat;
+    const auto resolve = [this](const QString& path) { return m_preview->resolvePath(path); };
+    if (!info.exists() || !loadPreviewMaterial(key, resolve, mat)) return nullptr;
+    entry->ok = true;
+    entry->baseColor = mat.baseColor;
+    entry->texturePath = mat.texturePath;
+    if (!mat.texturePath.isEmpty()) entry->textureModified = QFileInfo(mat.texturePath).lastModified();
+    if (!mat.texture.isNull()) {
+        entry->texture = std::make_unique<QOpenGLTexture>(mat.texture);
+        entry->texture->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
+        entry->texture->setMagnificationFilter(QOpenGLTexture::Linear);
+        entry->texture->setWrapMode(QOpenGLTexture::Repeat);
+    }
+    return entry.get();
+}
+
+void ModelViewport::bindMaterial(const std::string& contentPath, const QVector3D& fallback, const QVector3D* highlight)
+{
+    const MaterialEntry* mat = material(contentPath);
+    QVector3D color = mat ? mat->baseColor.toVector3D() : fallback;
+    if (highlight) color = (color + *highlight) * 0.5f;
+    m_meshProgram.setUniformValue("uColor", color);
+    QOpenGLTexture* texture = mat && mat->texture ? mat->texture.get() : m_whiteTexture.get();
+    texture->bind(0);
+}
+
 void ModelViewport::rebuildStaticMesh()
 {
     m_meshDirty = false;
     m_src.fill(m_doc->model());
-    m_skinned.assign(m_src.node.size() * 6, 0.0f);
+    m_skinned.assign(m_src.node.size() * kMeshStride, 0.0f);
     m_indicesPending = true;
 }
 
@@ -534,7 +621,8 @@ void ModelViewport::frameModel()
         lo = QVector3D(std::min(lo.x(), p.x()), std::min(lo.y(), p.y()), std::min(lo.z(), p.z()));
         hi = QVector3D(std::max(hi.x(), p.x()), std::max(hi.y(), p.y()), std::max(hi.z(), p.z()));
     };
-    for (size_t v = 0; v * 6 < m_skinned.size(); ++v) grow({m_skinned[v * 6], m_skinned[v * 6 + 1], m_skinned[v * 6 + 2]});
+    for (size_t v = 0; v * kMeshStride < m_skinned.size(); ++v)
+        grow({m_skinned[v * kMeshStride], m_skinned[v * kMeshStride + 1], m_skinned[v * kMeshStride + 2]});
     for (size_t n = 0; n * 16 < m_preview->nodeWorld().size(); ++n) grow(nodePosition(m_preview->nodeWorld(), int(n)));
     if (lo.x() > hi.x()) {
         lo = QVector3D(-1, 0, -1);
@@ -746,7 +834,7 @@ void ModelViewport::paintGL()
     if (m_overlays.mesh && !m_src.indices.empty()) {
         m_meshProgram.bind();
         m_meshProgram.setUniformValue("uViewProj", vp);
-        m_meshProgram.setUniformValue("uColor", QVector3D(0.72f, 0.72f, 0.76f));
+        m_meshProgram.setUniformValue("uTexture", 0);
         m_meshVao.bind();
         m_meshVbo.bind();
         m_meshVbo.allocate(m_skinned.data(), int(m_skinned.size() * sizeof(float)));
@@ -755,13 +843,24 @@ void ModelViewport::paintGL()
             m_meshIbo.allocate(m_src.indices.data(), int(m_src.indices.size() * sizeof(uint32_t)));
             m_indicesPending = false;
         }
-        glDrawElements(GL_TRIANGLES, GLsizei(m_src.indices.size()), GL_UNSIGNED_INT, nullptr);
+        // slot material, else the model default (no entity here to override either)
+        const KModelData& model = m_doc->model();
+        for (const Section& section : m_src.sections) {
+            std::string path;
+            const int slot = section.slot(model);
+            if (slot >= 0 && size_t(slot) < model.materials.size()) path = model.materials[size_t(slot)].materialPath;
+            if (path.empty()) path = model.defaultMaterial;
+            bindMaterial(path, kMeshColor, nullptr);
+            glDrawElements(GL_TRIANGLES, GLsizei(section.indexCount), GL_UNSIGNED_INT,
+                           reinterpret_cast<void*>(section.firstIndex * sizeof(uint32_t)));
+        }
         m_meshVao.release();
     }
 
     if (!m_childDraws.empty()) {
         m_meshProgram.bind();
         m_meshProgram.setUniformValue("uViewProj", vp);
+        m_meshProgram.setUniformValue("uTexture", 0);
         m_childVao.bind();
         m_childVbo.bind();
         m_childVbo.allocate(m_childVerts.data(), int(m_childVerts.size() * sizeof(float)));
@@ -770,7 +869,7 @@ void ModelViewport::paintGL()
         const QColor accent = kes::style::accent();
         const QVector3D selectedColor(float(accent.redF()), float(accent.greenF()), float(accent.blueF()));
         for (const ChildDraw& draw : m_childDraws) {
-            m_meshProgram.setUniformValue("uColor", draw.selected ? (kChildColor + selectedColor) * 0.5f : kChildColor);
+            bindMaterial(draw.materialPath, kChildColor, draw.selected ? &selectedColor : nullptr);
             glDrawElements(GL_TRIANGLES, GLsizei(draw.indexCount), GL_UNSIGNED_INT,
                            reinterpret_cast<void*>(draw.firstIndex * sizeof(uint32_t)));
         }

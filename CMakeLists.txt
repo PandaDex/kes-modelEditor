@@ -44,6 +44,8 @@ qt_add_executable(kesModelEditor
     src/PreviewState.cpp
     src/ModelViewport.h
     src/ModelViewport.cpp
+    src/MaterialPreview.h
+    src/MaterialPreview.cpp
     src/SkeletonPanel.h
     src/SkeletonPanel.cpp
     src/AttachmentPanel.h
